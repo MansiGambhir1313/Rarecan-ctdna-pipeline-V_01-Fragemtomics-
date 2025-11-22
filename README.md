@@ -2,11 +2,6 @@
 
 A comprehensive Nextflow-based pipeline for clinical-grade circulating tumor DNA (ctDNA) analysis with UMI-based error correction, designed for AWS HealthOmics deployment.
 
-## 🎯 Project Status
-
-**Current Status:** ~75% Complete - Core Pipeline Functional, Fragmentomics Implemented
-
-**See:** [Project Analysis](docs/PROJECT_ANALYSIS.md) for detailed status
 
 ## 📋 Features
 
@@ -117,9 +112,7 @@ The pipeline is configured for AWS HealthOmics deployment. Update `nextflow.conf
 - AWS Batch queue
 - S3 bucket paths
 
-### Container
 
-Currently uses a single universal container. See [IMPROVEMENTS_NEEDED.md](docs/IMPROVEMENTS_NEEDED.md) for planned one-process-one-container strategy.
 
 ## 📊 Output Structure
 
@@ -150,21 +143,8 @@ output/
 4. **Reference Genome**: Currently using placeholder reference - requires full hg38 for production
 5. **Licensing**: Manta, MSIsensor2 require commercial licenses for production use
 
-See [IMPROVEMENTS_NEEDED.md](docs/IMPROVEMENTS_NEEDED.md) for detailed list.
 
-## 📚 Documentation
 
-- [Project Analysis](docs/PROJECT_ANALYSIS.md) - Comprehensive status and gap analysis
-- [Improvements Needed](docs/IMPROVEMENTS_NEEDED.md) - Critical fixes and enhancements
-
-## 🔬 Clinical Validation
-
-**Status:** Validation framework not yet implemented
-
-**Planned:**
-- Tier 1: Analytical validation (SafeMut, HG002)
-- Tier 2: Scientific validation (MSK-IMPACT concordance)
-- Tier 3: Clinical validation (EGA-4847 dataset)
 
 ## 📝 License & Compliance
 
@@ -174,7 +154,7 @@ See [IMPROVEMENTS_NEEDED.md](docs/IMPROVEMENTS_NEEDED.md) for detailed list.
 - MSIsensor2: GPL-3.0 (should use MSIsensor-pro for commercial)
 - ichorCNA: GPL-3.0 (requires isolation)
 
-**Action Required:** Resolve licensing before commercial deployment
+
 
 ## 🤝 Contributing
 
@@ -194,4 +174,5 @@ For questions or issues, refer to project documentation or contact the developme
 ---
 
 **Note:** This pipeline is designed for clinical use and requires proper validation and regulatory compliance before deployment in clinical settings.
+
 
