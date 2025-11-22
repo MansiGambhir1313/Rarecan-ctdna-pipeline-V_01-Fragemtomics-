@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ctDNA Report: {{sample_id}}</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            line-height: 1.6;
+            background-color: #f8f9fa;
+            color: #212529;
+            margin: 0;
+            padding: 20px;
+        }
+        .container {
+            max-width: 900px;
+            margin: 20px auto;
+            background-color: #ffffff;
+            border-radius: 8px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.05);
+            overflow: hidden;
+        }
+        header {
+            background-color: #343a40;
+            color: #ffffff;
+            padding: 30px;
+            border-bottom: 4px solid #007bff;
+        }
+        header h1 {
+            margin: 0;
+            font-size: 2.5em;
+        }
+        header p {
+            margin: 0;
+            font-size: 1.2em;
+            color: #ced4da;
+        }
+        .summary-card {
+            text-align: center;
+            padding: 40px;
+            border-bottom: 1px solid #dee2e6;
+        }
+        .summary-card .label {
+            font-size: 1.1em;
+            color: #6c757d;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+        .summary-card .metric {
+            font-size: 5em;
+            font-weight: 700;
+            color: #007bff;
+            line-height: 1.2;
+            margin-top: 10px;
+        }
+        .summary-card .context {
+            font-size: 1em;
+            color: #495057;
+            margin-top: 10px;
+        }
+        .details-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 1px;
+            background-color: #dee2e6;
+            border-bottom: 1px solid #dee2e6;
+        }
+        .metric-box {
+            background-color: #ffffff;
+            padding: 25px;
+        }
+        .metric-box h3 {
+            margin: 0 0 15px 0;
+            color: #007bff;
+            font-size: 1.2em;
+        }
+        .metric-box .value {
+            font-size: 2.2em;
+            font-weight: 600;
+            color: #343a40;
+        }
+        .metric-box .context {
+            font-size: 0.9em;
+            color: #6c757d;
+            margin-top: 5px;
+        }
+        .json-data {
+            padding: 25px;
+        }
+        .json-data h3 {
+            color: #343a40;
+        }
+        pre {
+            background-color: #f1f3f5;
+            padding: 15px;
+            border-radius: 5px;
+            overflow-x: auto;
+            font-family: "SFMono-Regular", Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+            font-size: 0.85em;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>ctDNA Analysis Report</h1>
+            <p>Sample ID: <strong>{{sample_id}}</strong></p>
+        </header>
+
+        <div class="summary-card">
+            <div class="label">Final Consensus Purity Estimate</div>
+            <div class="metric">{{ctdna_purity_percent}}</div>
+            <div class="context">Method used: <strong>{{consensus_method}}</strong></div>
+        </div>
+
+        <div class="details-grid">
+            <div class="metric-box">
+                <h3>CNA-Based Purity</h3>
+                <div class="value">{{cna_based_percent}}</div>
+                <div class="context">Method: ichorCNA</div>
+            </div>
+            <div class="metric-box">
+                <h3>SNV/INDEL-Based Purity</h3>
+                <div class="value">{{snv_based_percent}}</div>
+                <div class="context">
+                    Method: GATK + Variant Fragmentomics (KS-Test) <br>
+                    (Based on <strong>{{somatic_variants_used}}</strong> of <strong>{{total_pass_variants}}</strong> PASS variants)
+                </div>
+            </div>
+            <div class="metric-box" style="grid-column: 1 / -1;">
+                <h3>Global QC: Short Fragment %</h3>
+                <div class="value">{{short_fragment_percent}}%</div>
+                <div class="context">{{fragment_qc_definition}}</div>
+            </div>
+        </div>
+
+        <div class="json-data">
+            <h3>Raw JSON Output</h3>
+            <pre>{{json_data}}</pre>
+        </div>
+    </div>
+</body>
+</html>

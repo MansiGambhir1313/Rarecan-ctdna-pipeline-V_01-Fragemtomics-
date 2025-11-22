@@ -1,0 +1,119 @@
+# Nextflow
+.nextflow/
+work/
+*.log
+.nextflow.log*
+
+# Results and outputs
+results/
+*.html
+!assets/**/*.html
+!**/templates/**/*.html
+*.json
+*.tsv
+*.vcf
+*.vcf.gz
+*.bam
+*.bai
+*.cram
+*.crai
+
+# Test files
+test_*.json
+test_*.tsv
+test_*.tsv
+
+# Data files (too large for git)
+data/fastq/
+data/reference/
+data/samples/
+*.fastq.gz
+*.fq.gz
+
+# Reference files (too large)
+assets/reference/hg38/*.fa
+assets/reference/hg38/*.fa.*
+*.fa
+*.fasta
+*.fa.fai
+*.dict
+*.mmi
+*.bwt
+*.pac
+*.ann
+*.amb
+*.sa
+
+# Temporary files
+*.tmp
+*.temp
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# IDE files
+.vscode/
+.idea/
+*.iml
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+.venv
+
+# R
+.Rhistory
+.RData
+.Ruserdata
+
+# Backup files
+backups/
+*.bak
+*.backup
+
+# Archives
+*.tar.gz
+*.zip
+*.gz
+
+# OS files
+C:UsersLENOVO/
+Mambaforge.sh
+
+# Pipeline execution files
+pipeline_*.log
+fragmentomics_*.log
+*.command.log
+*.command.err
+*.command.out
+
+# Environment and secrets
+.env
+*.key
+*.pem
+*.secret
+aws_credentials.txt
+
+# Documentation PDFs (too large)
+*.pdf
+
+# Workflow zip files
+workflow.zip
+
+# Email drafts (personal)
+EMAIL_TO_DR_BHARAT*.txt
+EMAIL_TO_DR_BHARAT*.md
+
+# Status files
+pipeline_status_summary.md
+*_STATUS.md
+*_SUMMARY.md
+
