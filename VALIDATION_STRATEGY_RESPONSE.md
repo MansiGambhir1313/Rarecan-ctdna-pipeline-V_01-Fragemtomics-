@@ -1,4 +1,4 @@
-# Response to Dr. Bharat - Validation Strategy
+# Response  - Validation Strategy
 
 **Date**: Current
 **Status**: Validation Strategy & Current State
