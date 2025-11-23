@@ -94,6 +94,7 @@ include { REPORT } from './modules/report'
 
 // Include PO-CFS filtering modules
 include { FRAGMENTOMICS } from './modules/fragmentomics'
+include { COMPUTE_CTDNA_PURITY } from './modules/fragmentomics'
 // CHIP_FILTER and CNA_CONTEXTUAL_FILTER are inlined as processes below
 // include { PON_GENERATION } from './modules/pon_generation'  // Skipped - not needed for fragmentomics run
 include { TFX_REPORT } from './modules/tfx_report'
@@ -483,10 +484,13 @@ workflow {
                     qc_results.reads ?: reads_ch,
                     file(params.ref)
                 )
-                // Join raw_bam and raw_bai to create [sample_id, bam, bai] tuple
+                // Create [sample_id, bam, bai] tuple without blocking join
+                // BAI is created alongside BAM, so reference it directly
                 raw_bam_for_cnv = raw_align_results.raw_bam
-                    .join(raw_align_results.raw_bai, by: 0)
-                    .map { sample_id, bam, bai -> [sample_id, bam, bai] }
+                    .map { sample_id, bam -> 
+                        def bai_file = file("${bam}.bai")
+                        [sample_id, bam, bai_file] 
+                    }
                 log.info "Minimap2 alignment completed for CNV/SV analysis (using raw BAM)"
                 
             } else {
@@ -502,10 +506,12 @@ workflow {
                 // Format: minimap2_results.consensus_bam = [sample_id, bam]
                 // Format: minimap2_results.consensus_bai = [sample_id, bai]
                 
-                // Use consensus BAM for variant calling (join BAM and BAI)
+                // Use consensus BAM for variant calling (use map to avoid blocking join)
                 def consensus_bam_with_index = minimap2_results.consensus_bam
-                    .join(minimap2_results.consensus_bai, by: 0)
-                    .map { sample_id, bam, bai -> [sample_id, bam] }
+                    .map { sample_id, bam -> 
+                        def bai_file = file("${bam}.bai")
+                        [sample_id, bam] 
+                    }
                 
                 align_results = [
                     bam: consensus_bam_with_index,
@@ -517,31 +523,35 @@ workflow {
                     contamination: Channel.empty()
                 ]
                 
-                // Store raw BAM for CNV/SV (join BAM and BAI to create [sample_id, bam, bai] tuple)
-                log.info "DEBUG: Setting up raw_bam_for_cnv by joining minimap2 raw_bam and raw_bai"
+                // Store raw BAM for CNV/SV (create [sample_id, bam, bai] tuple without blocking join)
+                log.info "DEBUG: Setting up raw_bam_for_cnv by mapping BAM to add BAI reference"
                 
-                // Use combine() instead of join() - combine pairs items from both channels
-                // Since both channels come from the same process, they should have matching sample_ids
+                // Alternative approach: Use map to add BAI reference directly (BAI is created alongside BAM)
+                // This avoids blocking join() operation that was causing pipeline to hang
                 raw_bam_for_cnv = minimap2_results.raw_bam
-                    .combine(minimap2_results.raw_bai, by: 0)
-                    .map { sample_id, bam, bai -> 
-                        log.info "DEBUG: Successfully combined raw BAM: sample_id=${sample_id}, bam=${bam}, bai=${bai}"
-                        [sample_id, bam, bai] 
+                    .map { sample_id, bam -> 
+                        // BAI file is created alongside BAM by samtools index, so reference it directly
+                        def bai_file = file("${bam}.bai")
+                        log.info "DEBUG: Created raw BAM tuple: sample_id=${sample_id}, bam=${bam}, bai=${bai_file}"
+                        [sample_id, bam, bai_file] 
                     }
                 
-                log.info "DEBUG: raw_bam_for_cnv channel created using combine()"
+                // Debug: Verify raw_bam_for_cnv has data (non-blocking check)
+                log.info "DEBUG: raw_bam_for_cnv channel created using direct map (no blocking join)"
                 
-                // Store consensus BAM with index for fragmentomics (combine BAM and BAI)
-                log.info "DEBUG: Setting up consensus_bam_with_index_for_frag by combining minimap2 consensus_bam and consensus_bai"
+                // Store consensus BAM with index for fragmentomics (create tuple without blocking join)
+                log.info "DEBUG: Setting up consensus_bam_with_index_for_frag by mapping BAM to add BAI reference"
                 
+                // Alternative approach: Use map to add BAI reference directly (avoids blocking join)
                 consensus_bam_with_index_for_frag = minimap2_results.consensus_bam
-                    .combine(minimap2_results.consensus_bai, by: 0)
-                    .map { sample_id, bam, bai -> 
-                        log.info "DEBUG: Successfully combined consensus BAM: sample_id=${sample_id}, bam=${bam}, bai=${bai}"
-                        [sample_id, bam, bai] 
+                    .map { sample_id, bam -> 
+                        // BAI file is created alongside BAM by samtools index, so reference it directly
+                        def bai_file = file("${bam}.bai")
+                        log.info "DEBUG: Created consensus BAM tuple: sample_id=${sample_id}, bam=${bam}, bai=${bai_file}"
+                        [sample_id, bam, bai_file] 
                     }
                 
-                log.info "DEBUG: consensus_bam_with_index_for_frag channel created using combine()"
+                log.info "DEBUG: consensus_bam_with_index_for_frag channel created using direct map (no blocking join)"
                 
                 log.info "Minimap2 alignment completed successfully (raw and consensus BAMs generated)"
             }
@@ -597,6 +607,71 @@ workflow {
             return
         }
         
+        // CRITICAL FIX: Execute CNV FIRST (before SNV) to ensure it runs
+        // CNV needs raw BAM which is available immediately after alignment
+        log.info "Step 4: Copy Number Variation Analysis${params.enable_cnv ? '' : ' (disabled)'}"
+        def cnv_results = [
+            gene_calls: Channel.empty(),
+            segments: Channel.empty(),
+            ichorcna_segments: Channel.empty(),
+            plot: Channel.empty(),
+            tumor_fraction: Channel.empty(),
+            tfx: Channel.empty(),
+            ichorcna_summary: Channel.empty()
+        ]
+        
+        // Execute CNV immediately - don't wait for anything, let CNV handle empty channels
+        if (params.enable_cnv) {
+            try {
+                log.info "DEBUG: Starting CNV analysis setup - executing immediately"
+                
+                // Prepare BAM channel for CNV - use direct file reference if available, otherwise use channels
+                def bam_for_cnv = Channel.empty()
+                
+                // CRITICAL FIX: Check if BAM file already exists in results (from previous run or current run)
+                def bam_path = file("${params.outdir}/${params.sample_id}/alignment/${params.sample_id}.raw.bam")
+                if (bam_path.exists()) {
+                    log.info "DEBUG: Found existing BAM file directly: ${bam_path}"
+                    bam_for_cnv = Channel.from([params.sample_id, bam_path])
+                    log.info "DEBUG: Using direct BAM file for CNV: ${bam_path}"
+                } else if (raw_bam_for_cnv != null) {
+                    // Try raw_bam_for_cnv channel (preferred - raw BAM for CNV)
+                    log.info "DEBUG: Using raw_bam_for_cnv channel for CNV (extracting [sample_id, bam] from [sample_id, bam, bai])"
+                    bam_for_cnv = raw_bam_for_cnv.map { sid, bam_file, bai_file -> 
+                        log.info "DEBUG: CNV input prepared from channel - sample_id: ${sid}, bam: ${bam_file}"
+                        [sid, bam_file] 
+                    }
+                } else if (align_results?.bam != null) {
+                    log.info "DEBUG: Using align_results.bam for CNV (fallback)"
+                    bam_for_cnv = align_results.bam
+                } else {
+                    log.warn "WARN: No BAM available - calling CNV with empty channel (will create placeholder outputs)"
+                    bam_for_cnv = Channel.empty()
+                }
+                
+                // Always call CNV - it has errorStrategy 'ignore' and will handle empty channels
+                log.info "DEBUG: Calling CNV workflow NOW (not waiting for anything)"
+                log.info "CNV analysis starting (including ichorCNA tumor fraction estimation)"
+                
+                cnv_results = CNV(
+                    bam_for_cnv, 
+                    file(params.bed),
+                    file(params.cnv_pon),
+                    file(params.ref)
+                )
+                
+                log.info "DEBUG: CNV workflow CALLED - execution will proceed independently"
+                log.info "DEBUG: CNV processes will start when BAM data is available"
+            } catch (Exception e) {
+                log.error "CNV module failed: ${e.message}"
+                log.error "CNV error: ${e.getClass().getName()}: ${e.getMessage()}"
+                e.printStackTrace()
+            }
+        } else {
+            log.warn "CNV analysis disabled via params.enable_cnv=false; skipping ichorCNA"
+        }
+        
+        // Now execute SNV (after CNV to avoid blocking)
         log.info "Step 3: Small Variant Calling"
         def snv_results = null
         def consensus_bam_for_fragmentomics = null
@@ -620,7 +695,7 @@ workflow {
                     pon_channel,
                     germline_resource_path
                 )
-                log.info "SNV calling completed${use_consensus_bam ? ' (using UMI consensus BAM)' : ''}"
+                log.info "SNV calling initiated${use_consensus_bam ? ' (using UMI consensus BAM)' : ''}"
             } else {
                 log.warn "Skipping SNV calling - no valid BAM from alignment"
                 snv_results = [
@@ -638,41 +713,9 @@ workflow {
             ]
         }
         
-        log.info "Step 4: Copy Number Variation Analysis${params.enable_cnv ? '' : ' (disabled)'}"
-        def cnv_results = [
-            gene_calls: Channel.empty(),
-            segments: Channel.empty(),
-            plot: Channel.empty(),
-            tumor_fraction: Channel.empty(),
-            ichorcna_summary: Channel.empty()
-        ]
-        if (params.enable_cnv) {
-        try {
-            // Check if we have valid BAM output from alignment
-            def has_valid_bam = align_results?.bam != null
-            
-            if (has_valid_bam) {
-                // Use raw BAM for CNV (not consensus) - CNV needs all reads
-                def bam_for_cnv = raw_bam_for_cnv ?: align_results.bam
-                cnv_results = CNV(
-                    bam_for_cnv, 
-                    file(params.bed),
-                    file(params.cnv_pon),
-                    file(params.ref)
-                )
-                log.info "CNV analysis completed (including ichorCNA tumor fraction estimation)"
-            } else {
-                log.warn "Skipping CNV analysis - no valid BAM from alignment"
-            }
-        } catch (Exception e) {
-            log.warn "CNV module failed: ${e.message}, continuing with empty results"
-            }
-        } else {
-            log.warn "CNV analysis disabled via params.enable_cnv=false; skipping ichorCNA"
-        }
-        
         // Step 3.1: PO-CFS Filtering Stack (after CNV for CNA-contextual filtering)
-        def filtered_vcf = snv_results.vcf
+        // Use null-safe access to avoid errors if SNV workflow fails
+        def filtered_vcf = snv_results?.vcf ?: Channel.empty()
         
         def fragmentomics_outputs = [
             summary: Channel.empty(),
@@ -726,7 +769,7 @@ workflow {
                 }
                 
                 // Use empty VCF channel if SNV calling didn't produce VCF
-                def vcf_for_frag = snv_results?.vcf ?: Channel.empty()
+                def vcf_for_frag = (snv_results != null && snv_results.vcf != null) ? snv_results.vcf : Channel.empty()
                 log.info "DEBUG: vcf_for_frag is ${vcf_for_frag ? 'defined' : 'empty'}"
                 
                 if (raw_bam_with_index) {
@@ -768,7 +811,7 @@ workflow {
             if (filtered_vcf && cnv_results?.segments) {
                 cna_adjusted = CNA_CONTEXTUAL_FILTER_PROCESS(
                     filtered_vcf,
-                    cnv_results.segments,
+                    cnv_results?.segments ?: Channel.empty(),
                     file(params.ref)
                 )
                 filtered_vcf = cna_adjusted.adjusted_vcf
@@ -776,6 +819,72 @@ workflow {
             }
         } catch (Exception e) {
             log.warn "CNA-contextual filtering failed: ${e.message}, using previous VCF"
+        }
+        
+        // Step 3.4: Comprehensive ctDNA Purity Computation (Core Analytical Component)
+        // Integrates ichorCNA tumor fraction, fragment-length KS logic, and SNV/INDEL purity
+        def ctdna_purity_results = [
+            purity_json: Channel.empty(),
+            purity_tfx: Channel.empty()
+        ]
+        if (params.enable_fragmentomics) {
+            log.info "Step 3.4: Computing comprehensive ctDNA purity (ichorCNA + fragment KS + SNV/INDEL)"
+            try {
+                // Prepare inputs for ctDNA purity computation
+                // Use ichorCNA tfx file (contains tumorFraction) and segments
+                // Prefer .seg.txt format (reference pipeline format), fallback to _ichorcna_segments.txt
+                // Use CHIP-filtered VCF for SNV purity (if available), otherwise use raw VCF
+                def ichorcna_tfx_ch = cnv_results?.tfx ?: Channel.empty()
+                // Try both possible output names for ichorCNA segments
+                def ichorcna_segments_ch = cnv_results?.ichorcna_seg_txt ?: cnv_results?.ichorcna_segments ?: Channel.empty()
+                def frag_vcf_ch = fragmentomics_outputs?.frag_vcf ?: Channel.empty()
+                // Use filtered_vcf (which includes CHIP filtering) for SNV purity computation
+                def snv_vcf_ch = filtered_vcf ?: snv_results?.vcf ?: Channel.empty()
+                
+                // Debug: Check channel contents (non-blocking)
+                // Note: Removed .count().get() calls as they block execution
+                log.info "DEBUG: Preparing ctDNA purity inputs from ichorCNA, fragmentomics, and SNV channels"
+                
+                // Get sample_id from any available channel (prefer ichorCNA as primary source)
+                def sample_id_ch = ichorcna_tfx_ch.map { sid, tfx -> sid }
+                    .mix(ichorcna_segments_ch.map { sid, seg -> sid })
+                    .mix(frag_vcf_ch.map { sid, vcf -> sid })
+                    .mix(snv_vcf_ch.map { sid, vcf -> sid })
+                    .unique()
+                
+                log.info "DEBUG: sample_id_ch created from available input channels"
+                
+                // Note: Cannot use .count().get() as it blocks execution - let the process handle empty channels
+                // The COMPUTE_CTDNA_PURITY process will handle empty channels gracefully
+                // Join all inputs by sample_id with remainder handling
+                def ctdna_inputs = sample_id_ch
+                        .map { sid -> [sid] }
+                        .join(ichorcna_tfx_ch.map { sid, tfx -> [sid, tfx] }, by: 0, remainder: true)
+                        .join(ichorcna_segments_ch.map { sid, seg -> [sid, seg] }, by: 0, remainder: true)
+                        .join(frag_vcf_ch.map { sid, vcf -> [sid, vcf] }, by: 0, remainder: true)
+                        .join(snv_vcf_ch.map { sid, vcf -> [sid, vcf] }, by: 0, remainder: true)
+                        .map { sid, tfx, seg, frag_vcf, snv_vcf ->
+                            log.info "DEBUG: ctDNA purity input tuple - sample_id: ${sid}, tfx: ${tfx}, seg: ${seg}, frag_vcf: ${frag_vcf}, snv_vcf: ${snv_vcf}"
+                            [
+                                sid,
+                                tfx ?: file("NO_FILE"),
+                                seg ?: file("NO_FILE"),
+                                frag_vcf ?: file("NO_FILE"),
+                                snv_vcf ?: file("NO_FILE")
+                            ]
+                        }
+                
+                // Note: Removed .count().get() as it blocks execution
+                // Call COMPUTE_CTDNA_PURITY - it will handle empty channels gracefully
+                ctdna_purity_results = COMPUTE_CTDNA_PURITY(ctdna_inputs)
+                log.info "Comprehensive ctDNA purity computation started (consensus of ichorCNA + fragment KS + SNV/INDEL)"
+            } catch (Exception e) {
+                log.warn "ctDNA purity computation failed: ${e.message}, continuing without purity estimates"
+                log.error "ctDNA purity error details: ${e.getClass().getName()}: ${e.getMessage()}"
+                e.printStackTrace()
+            }
+        } else {
+            log.warn "Fragmentomics disabled - skipping comprehensive ctDNA purity computation"
         }
         
         log.info "Step 5: Structural Variant Detection${params.enable_sv ? '' : ' (disabled)'}"

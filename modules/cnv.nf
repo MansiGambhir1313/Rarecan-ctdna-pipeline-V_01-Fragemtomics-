@@ -4,7 +4,7 @@ nextflow.enable.dsl=2
 
 process CNVKIT_COVERAGE {
     tag "$sample_id"
-    label 'process_medium'
+    label 'process_low'  // Reduced memory requirement
     container '965747689553.dkr.ecr.eu-west-2.amazonaws.com/ctdna-universal:latest'
     errorStrategy 'ignore'
     
@@ -467,6 +467,7 @@ process ICHORCNA {
     tuple val(sample_id), path("${sample_id}_ichorcna_tumor_fraction.txt"), emit: tumor_fraction, optional: true
     tuple val(sample_id), path("${sample_id}_ichorcna_summary.txt"), emit: summary, optional: true
     tuple val(sample_id), path("${sample_id}.tfx.txt"), emit: tfx, optional: true
+    path "${sample_id}.seg.txt", emit: seg_txt, optional: true
     path "${sample_id}_ichorcna_segments.txt", emit: segments, optional: true
     path "versions.yml", emit: versions
     
@@ -515,9 +516,19 @@ END_VERSIONS
     fi
     
     # Use the TFX pipeline run_ichorcna.R script if available, otherwise use inline version
+    USE_INLINE=false
+    ICHORCNA_SCRIPT=""
+    
+    # Check for run_ichorcna.R script in multiple locations
     if [ -f "${projectDir}/bin/run_ichorcna.R" ]; then
-        echo "Using TFX pipeline run_ichorcna.R script"
-        
+        ICHORCNA_SCRIPT="${projectDir}/bin/run_ichorcna.R"
+        echo "Using TFX pipeline run_ichorcna.R script at \${ICHORCNA_SCRIPT}"
+    elif [ -f "bin/run_ichorcna.R" ]; then
+        ICHORCNA_SCRIPT="bin/run_ichorcna.R"
+        echo "Using TFX pipeline run_ichorcna.R script at \${ICHORCNA_SCRIPT}"
+    fi
+    
+    if [ -n "\${ICHORCNA_SCRIPT}" ] && [ -f "\${ICHORCNA_SCRIPT}" ]; then
         # First, create WIG file from BAM using bedtools genomecov
         if command -v bedtools >/dev/null 2>&1; then
             echo "Creating WIG file from BAM..."
@@ -531,12 +542,12 @@ END_VERSIONS
             USE_INLINE=true
         fi
         
-        if [ "$USE_INLINE" != "true" ] && [ -f "${sample_id}.wig" ]; then
+        if [ "\$USE_INLINE" != "true" ] && [ -f "\${sample_id}.wig" ] && [ -s "\${sample_id}.wig" ]; then
             # Run the TFX pipeline script
-            Rscript ${projectDir}/bin/run_ichorcna.R \\
-                --wig ${sample_id}.wig \\
+            if Rscript \${ICHORCNA_SCRIPT} \\
+                --wig \${sample_id}.wig \\
                 --outdir . \\
-                --sample ${sample_id} \\
+                --sample \${sample_id} \\
                 --binSize 500000 \\
                 --ploidy "c(2,3)" \\
                 --normal "c(0.5,0.7,0.8,0.9,0.95)" \\
@@ -544,19 +555,44 @@ END_VERSIONS
                 --estimateNormal \\
                 --estimatePloidy \\
                 --txnE 0.9999 \\
-                --txnStrength 10000 || {
+                --txnStrength 10000 2>&1 | tee ichorcna_run.log; then
+                
+                # Check if outputs were created
+                if [ -f "${sample_id}.tfx.txt" ] && [ -f "${sample_id}.seg.txt" ]; then
+                    echo "ichorCNA completed successfully using TFX pipeline script"
+                    ICHORCNA_SUCCESS=true
+                    
+                    # Copy segments file to expected name for compatibility
+                    cp ${sample_id}.seg.txt ${sample_id}_ichorcna_segments.txt 2>/dev/null || true
+                    
+                    # Extract tumor fraction for summary file
+                    if [ -f "${sample_id}.tfx.txt" ]; then
+                        tfx_val=\$(awk 'NR==2 {print \$2}' ${sample_id}.tfx.txt 2>/dev/null || echo "0.0")
+                        echo "Tumor Fraction: \${tfx_val}" > ${sample_id}_ichorcna_summary.txt
+                        echo "\${tfx_val}" > ${sample_id}_ichorcna_tumor_fraction.txt
+                    fi
+                else
+                    echo "WARNING: TFX run_ichorcna.R completed but outputs missing, using inline version"
+                    USE_INLINE=true
+                fi
+            else
                 echo "WARNING: TFX run_ichorcna.R failed, using inline version"
+                cat ichorcna_run.log 2>/dev/null || echo "No log available"
                 USE_INLINE=true
-            }
+            fi
+        else
+            echo "WARNING: WIG file missing or empty, using inline ichorCNA"
+            USE_INLINE=true
         fi
     else
+        echo "WARNING: run_ichorcna.R not found, using inline version"
         USE_INLINE=true
     fi
     
-    if [ "$USE_INLINE" = "true" ]; then
+    if [ "\${USE_INLINE}" = "true" ]; then
         echo "Using inline ichorCNA implementation"
-    # Create ichorCNA R script
-    cat > run_ichorcna.R << 'EOF'
+        # Create ichorCNA R script
+        cat > run_ichorcna.R << 'RSCRIPT_EOF'
 library(ichorCNA)
 library(GenomicRanges)
 
@@ -567,9 +603,9 @@ ref_fasta <- args[2]
 sample_id <- args[3]
 output_prefix <- args[4]
 
-cat("Running ichorCNA for sample:", sample_id, "\\n")
-cat("BAM file:", bam_file, "\\n")
-cat("Reference:", ref_fasta, "\\n")
+cat("Running ichorCNA for sample:", sample_id, "\n")
+cat("BAM file:", bam_file, "\n")
+cat("Reference:", ref_fasta, "\n")
 
 # ichorCNA parameters
 gcWig <- NULL  # Will use default GC correction
@@ -604,9 +640,9 @@ tryCatch({
     
     # Extract tumor fraction
     if (!is.null(results) && "tumorFraction" %in% names(results)) {
-        tf <- results$tumorFraction
+        tf <- results\$tumorFraction
     } else if (!is.null(results) && "fraction" %in% names(results)) {
-        tf <- results$fraction
+        tf <- results\$fraction
     } else {
         tf <- 0.0
     }
@@ -616,43 +652,68 @@ tryCatch({
     tfx_df <- data.frame(sample=sample_id, tumorFraction=tf)
     write.table(tfx_df,
                 file = paste0(output_prefix, ".tfx.txt"),
-                sep = "\\t", quote = FALSE, row.names = FALSE)
+                sep = "\t", quote = FALSE, row.names = FALSE)
     
     # Write summary
-    summary_text <- paste0("Tumor Fraction: ", round(tf * 100, 2), "%\\n")
+    summary_text <- paste0("Tumor Fraction: ", round(tf * 100, 2), "%\n")
     if (!is.null(results) && "ploidy" %in% names(results)) {
-        summary_text <- paste0(summary_text, "Ploidy: ", results$ploidy, "\\n")
+        summary_text <- paste0(summary_text, "Ploidy: ", results\$ploidy, "\n")
     }
     write(summary_text, file = paste0(output_prefix, "_ichorcna_summary.txt"))
     
-    # Write segments if available
-    if (!is.null(results) && "segments" %in% names(results)) {
-        write.table(results$segments, 
+    # Write segments if available (match reference pipeline format)
+    if (!is.null(results) && "cna.seg" %in% names(results)) {
+        # Use cna.seg which has proper format: chr, start, end, log2, etc.
+        seg_df <- results\$cna.seg
+        # Ensure column names match expected format
+        if (!is.null(seg_df) && nrow(seg_df) > 0) {
+            write.table(seg_df, 
+                       file = paste0(output_prefix, ".seg.txt"),
+                       sep = "\t", quote = FALSE, row.names = FALSE)
+            # Also create compatibility file
+            write.table(seg_df, 
+                       file = paste0(output_prefix, "_ichorcna_segments.txt"),
+                       sep = "\t", quote = FALSE, row.names = FALSE)
+        } else {
+            # Create empty segments file with proper header
+            cat("chromosome\tstart\tend\tlog2\tcopy_number\n", 
+                file = paste0(output_prefix, ".seg.txt"))
+            cat("chromosome\tstart\tend\tlog2\tcopy_number\n", 
+                file = paste0(output_prefix, "_ichorcna_segments.txt"))
+        }
+    } else if (!is.null(results) && "segments" %in% names(results)) {
+        # Fallback to segments if cna.seg not available
+        write.table(results\$segments, 
+                   file = paste0(output_prefix, ".seg.txt"),
+                   sep = "\t", quote = FALSE, row.names = FALSE)
+        write.table(results\$segments, 
                    file = paste0(output_prefix, "_ichorcna_segments.txt"),
-                   sep = "\\t", quote = FALSE, row.names = FALSE)
+                   sep = "\t", quote = FALSE, row.names = FALSE)
     } else {
-        # Create empty segments file
-        cat("chromosome\\tstart\\tend\\tlog2\\tcopy_number\\n", 
+        # Create empty segments file with proper header
+        cat("chromosome\tstart\tend\tlog2\tcopy_number\n", 
+            file = paste0(output_prefix, ".seg.txt"))
+        cat("chromosome\tstart\tend\tlog2\tcopy_number\n", 
             file = paste0(output_prefix, "_ichorcna_segments.txt"))
     }
     
-    cat("ichorCNA completed successfully. Tumor fraction:", tf, "\\n")
+    cat("ichorCNA completed successfully. Tumor fraction:", tf, "\n")
     
 }, error = function(e) {
-    cat("ERROR in ichorCNA:", e$message, "\\n")
+    cat("ERROR in ichorCNA:", e\$message, "\n")
     
     # Write default outputs on error
     write("0.0", file = paste0(output_prefix, "_ichorcna_tumor_fraction.txt"))
     tfx_df <- data.frame(sample=sample_id, tumorFraction=0.0)
     write.table(tfx_df,
                 file = paste0(output_prefix, ".tfx.txt"),
-                sep = "\\t", quote = FALSE, row.names = FALSE)
-    cat("Tumor Fraction: 0.0% (Analysis Failed)\\n", 
+                sep = "\t", quote = FALSE, row.names = FALSE)
+    cat("Tumor Fraction: 0.0% (Analysis Failed)\n", 
         file = paste0(output_prefix, "_ichorcna_summary.txt"))
-    cat("chromosome\\tstart\\tend\\tlog2\\tcopy_number\\n", 
+    cat("chromosome\tstart\tend\tlog2\tcopy_number\n", 
         file = paste0(output_prefix, "_ichorcna_segments.txt"))
 })
-EOF
+RSCRIPT_EOF
 
     # Run ichorCNA
     if command -v Rscript >/dev/null 2>&1; then
@@ -674,7 +735,7 @@ EOF
         echo "WARNING: Rscript not found"
     fi
     
-    # Ensure output files exist
+    # Ensure output files exist (with proper fallback)
     if [ ! -f "${sample_id}_ichorcna_tumor_fraction.txt" ]; then
         echo "0.0" > ${sample_id}_ichorcna_tumor_fraction.txt
     fi
@@ -684,19 +745,30 @@ EOF
     fi
     
     if [ ! -f "${sample_id}.tfx.txt" ]; then
-        printf "sample\ttumorFraction\n%s\t0.0\n" "${sample_id}" > ${sample_id}.tfx.txt
+        printf "sample\ttumorFraction\tploidy\n%s\t0.0\tNA\n" "${sample_id}" > ${sample_id}.tfx.txt
+    fi
+    
+    # Ensure segments files exist (both formats for compatibility)
+    if [ ! -f "${sample_id}.seg.txt" ]; then
+        echo -e "chromosome\tstart\tend\tlog2\tcopy_number" > ${sample_id}.seg.txt
     fi
     
     if [ ! -f "${sample_id}_ichorcna_segments.txt" ]; then
-        touch ${sample_id}_ichorcna_segments.txt
+        # Copy from .seg.txt if it exists, otherwise create empty
+        if [ -f "${sample_id}.seg.txt" ] && [ -s "${sample_id}.seg.txt" ]; then
+            cp ${sample_id}.seg.txt ${sample_id}_ichorcna_segments.txt
+        else
+            echo -e "chromosome\tstart\tend\tlog2\tcopy_number" > ${sample_id}_ichorcna_segments.txt
+        fi
     fi
     
-    cat <<-END_VERSIONS > versions.yml
+        cat <<-END_VERSIONS > versions.yml
 "${task.process}":
     ichorcna: \$(Rscript -e "packageVersion('ichorCNA')" 2>/dev/null | sed 's/.*\\[1\\] //' || echo "unknown")
     r: \$(R --version 2>&1 | head -1 | sed 's/.*version //' || echo "unknown")
     status: \$([ "\${ICHORCNA_SUCCESS}" = "true" ] && echo "success" || echo "failed")
 END_VERSIONS
+    fi
     
     set -e
     exit 0
@@ -951,20 +1023,50 @@ workflow CNV {
     
     CNV_FILTER_CALLS(gene_calls_combined)
     
-    // ichorCNA for tumor fraction estimation
+    // ichorCNA for tumor fraction estimation - runs independently of CNVKIT
+    // ICHORCNA does not depend on CNVKIT processes, so it can run even if CNVKIT fails
     ICHORCNA(
         bam,
         ref_fasta
     )
     
-    // Combine versions
-    ch_versions = CNVKIT_COVERAGE.out.versions
-        .mix(CNVKIT_FIX.out.versions)
-        .mix(CNVKIT_SEGMENT.out.versions)
-        .mix(CNVKIT_CALL.out.versions)
-        .mix(CNVKIT_GENEMETRICS.out.versions)
-        .mix(CNV_FILTER_CALLS.out.versions)
-        .mix(ICHORCNA.out.versions)
+    // Combine versions - use safe mixing to handle missing outputs gracefully
+    ch_versions = Channel.empty()
+    try {
+        if (CNVKIT_COVERAGE.out.versions != null) {
+            ch_versions = ch_versions.mix(CNVKIT_COVERAGE.out.versions)
+        }
+    } catch (Exception e) {}
+    try {
+        if (CNVKIT_FIX.out.versions != null) {
+            ch_versions = ch_versions.mix(CNVKIT_FIX.out.versions)
+        }
+    } catch (Exception e) {}
+    try {
+        if (CNVKIT_SEGMENT.out.versions != null) {
+            ch_versions = ch_versions.mix(CNVKIT_SEGMENT.out.versions)
+        }
+    } catch (Exception e) {}
+    try {
+        if (CNVKIT_CALL.out.versions != null) {
+            ch_versions = ch_versions.mix(CNVKIT_CALL.out.versions)
+        }
+    } catch (Exception e) {}
+    try {
+        if (CNVKIT_GENEMETRICS.out.versions != null) {
+            ch_versions = ch_versions.mix(CNVKIT_GENEMETRICS.out.versions)
+        }
+    } catch (Exception e) {}
+    try {
+        if (CNV_FILTER_CALLS.out.versions != null) {
+            ch_versions = ch_versions.mix(CNV_FILTER_CALLS.out.versions)
+        }
+    } catch (Exception e) {}
+    try {
+        if (ICHORCNA.out.versions != null) {
+            ch_versions = ch_versions.mix(ICHORCNA.out.versions)
+        }
+    } catch (Exception e) {}
     
     emit:
     cnr = CNVKIT_FIX.out.cnr
@@ -973,6 +1075,8 @@ workflow CNV {
     gene_calls = CNV_FILTER_CALLS.out.filtered_calls
     gene_metrics = CNVKIT_GENEMETRICS.out.gene_metrics
     segments = CNVKIT_SEGMENT.out.cns
+    ichorcna_segments = ICHORCNA.out.segments
+    ichorcna_seg_txt = ICHORCNA.out.seg_txt
     stats = CNV_FILTER_CALLS.out.stats
     tumor_fraction = ICHORCNA.out.tumor_fraction
     ichorcna_summary = ICHORCNA.out.summary
